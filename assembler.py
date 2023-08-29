@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from util import *
-
-SOURCE_FILE = None
+import argparse
 
 MEM_OPCODE = '000'
 ADD_OPCODE = '001'
@@ -650,9 +649,20 @@ def encode_machine_instructions(machine_instructions: [MachineInstruction]) -> [
 		encoded_machine_instructions.append(encode_machine_instruction(machine_instr))
 	return encoded_machine_instructions
 
+def parse_args():
+	parser = argparse.ArgumentParser()
+	parser.add_argument('-i', '--input', help='Input File Path', required=True)
+	parser.add_argument('-o', '--output', help='Output File Path', required=True)
+	args = parser.parse_args()
+	return args
+
 def main():
-	SOURCE_FILE = 'input.txt'
-	cleaned_lines = get_cleaned_lines(SOURCE_FILE)
+	# use argparse to parse the arguments
+	# python3 assembler.py -i <input_file> -o <output_file>
+	args = parse_args()
+	source_file = args.input
+	output_file = args.output
+	cleaned_lines = get_cleaned_lines(source_file)
 	source_artifacts = get_source_artifacts(cleaned_lines)
 	intermediate_instructions = process_source_artifacts(source_artifacts)
 	machine_instructions = process_intermediate_instructions(intermediate_instructions)
@@ -661,6 +671,7 @@ def main():
 	encoded_machine_instructions = encode_machine_instructions(machine_instructions)
 	for (machine_instruction, encoded_machine_instruction) in zip(machine_instructions, encoded_machine_instructions):
 		print(f'{encoded_machine_instruction} <- {machine_instruction}')
+	write_machine_code(output_file, encoded_machine_instructions)
 
 if __name__ == '__main__':
 	main()
