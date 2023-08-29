@@ -1,6 +1,7 @@
 from dataclasses import dataclass
+from util import *
 
-SOURCE_FILE = 'source.dlas'
+SOURCE_FILE = None
 
 MEM_OPCODE = '000'
 ADD_OPCODE = '001'
@@ -19,6 +20,7 @@ SUPPORTED_REGISTER_ONLY_INSTRUCTIONS = []
 SUPPORTED_IMMEDIATE_ONLY_INSTRUCTIONS = []
 SUPPORTED_MEMORY_INSTRUCTIONS = ['LDR', 'STR']
 SUPPORTED_BRANCH_INSTRUCTIONS = ['BEQ']
+SUPPORTED_SINGLE_INSTRUCTIONS = ['ZER']
 
 '''
 Machine Code (9 Bits):
@@ -30,7 +32,7 @@ General Layout:
 '''
 
 '''
-Supported Instructions:
+Programmer Supported Instructions:
 
 ADD
 	ADD R1, R2				// R1 = R1 + R2
@@ -66,6 +68,8 @@ BEQ
 MOV
 	MOV R1, R2				// R1 = R2
     MOV R1, #37				// R1 = 37
+ZER
+	ZER R1					// R1 = 0
 
     
 Tags are also supported:
@@ -90,6 +94,54 @@ Bit Layout: [8:6] 	Opcode (110 for SET)
 			[5]		Unused
 			[4]		Flag (0 for setting the lower 4 bits, 1 for setting the upper 4 bits)
 			[3:0]	Half of the immediate value
+
+'''
+
+'''
+Machine Supported Instructions:
+(Bit Layout - 9 Bits)
+
+MEM
+	000 OPCODE
+	RRR TARGET REGISTER
+	F 	FLAG (0 for load, 1 for store)
+	XX	UNUSED
+
+ADD
+	001 OPCODE
+	RRR DEST REGISTER
+	RRR SOURCE REGISTER
+
+AND
+	010 OPCODE
+	RRR DEST REGISTER
+	RRR SOURCE REGISTER
+
+XOR
+	011 OPCODE
+	RRR DEST REGISTER
+	RRR SOURCE REGISTER
+
+ROL
+	100 OPCODE
+	RRR DEST REGISTER
+	RRR SOURCE REGISTER
+
+BEQ
+	101 OPCODE
+	RRR OPERAND REGISTER 1
+	RRR OPERAND REGISTER 2
+
+SET
+	110 	OPCODE
+	X		UNUSED
+	F		FLAG (0 for setting the lower 4 bits, 1 for setting the upper 4 bits)
+	XXXX 	HALF IMMEDIATE
+
+MOV
+	111 OPCODE
+	RRR DEST REGISTER
+	RRR SOURCE REGISTER
 
 '''
 
@@ -123,24 +175,19 @@ class RegisterIntermediateInstruction(IntermediateInstruction):
 @dataclass
 class ImmediateIntermediateInstruction(IntermediateInstruction):
 	dest_reg: str
-	imm: int
+	imm: str
 
 @dataclass
 class MemoryIntermediateInstruction(IntermediateInstruction):
 	is_load: bool
-	dest_reg: str
-	addr: int
-
-@dataclass
-class SetIntermediateInstruction(IntermediateInstruction):
-	flag: bool = False
-	imm: int
+	target_reg: str
+	addr: str
 
 @dataclass
 class BranchIntermediateInstruction(IntermediateInstruction):
 	operand_reg1: str
 	operand_reg2: str
-	dest_addr: int
+	tagname: str
 
 @dataclass
 class TagIntermediateInstruction(IntermediateInstruction):
@@ -158,40 +205,34 @@ class RegMachineInstr(MachineInstruction):
 
 @dataclass
 class SetMachineInstr(MachineInstruction):
-	flag: bool = False
-	imm: int
+	flag: bool
+	imm: str
 
 @dataclass
 class MemMachineInstr(MachineInstruction):
 	is_load: bool
-	dest_reg: str
+	target_reg: str
 
-def clean_lines(lines: [str]) -> [str]:
-	cleaned = []
-	# trim the lines
-	# remove empty lines
-	# remove lines that start with //
-	for line in lines:
-		line = line.strip()
-		if line != '' and not line.startswith('//'):
-			cleaned.append(line)
-	return cleaned
+@dataclass
+class BrnMachineInstr(MachineInstruction):
+	operand_reg1: str
+	operand_reg2: str
+	tagname: str
 
-def get_lines(filename: str) -> [str]:
-	with open(filename) as f:
-		lines = f.readlines()
-	return lines
+@dataclass
+class TagMachineInstruction(MachineInstruction):
+	tagname: str
 
-def get_cleaned_lines(filename: str) -> [str]:
-	lines = get_lines(filename)
-	return clean_lines(lines)
+# ----------------------------------------------
 
 def is_valid_instruction(tokens: [str]) -> bool:
-	if len(tokens) != 3 or len(tokens) != 4 or tokens[0].startswith('@'):
+	if len(tokens) != 2 and len(tokens) != 3 and len(tokens) != 4 and not tokens[0].startswith('@'):
 		return False
 	mnemonic = tokens[0]
 	operand1 = tokens[1]
-	operand2 = tokens[2]
+	operand2 = None
+	if len(tokens) == 3 or len(tokens) == 4:
+		operand2 = tokens[2]
 	# multi instructions must either have two registers or one reg and one imm in the form of #<imm>
 	if mnemonic in SUPPORTED_MULTI_INSTRUCTIONS:
 		if operand1 in SUPPORTED_REGISTERS and operand2 in SUPPORTED_REGISTERS:
@@ -210,6 +251,21 @@ def is_valid_instruction(tokens: [str]) -> bool:
 			return True
 		else:
 			return False
+	elif mnemonic in SUPPORTED_MEMORY_INSTRUCTIONS:
+		if operand1 in SUPPORTED_REGISTERS and operand2.startswith('#') and operand2[1:].isnumeric():
+			return True
+		else:
+			return False
+	elif mnemonic in SUPPORTED_BRANCH_INSTRUCTIONS:
+		if operand1 in SUPPORTED_REGISTERS and operand2 in SUPPORTED_REGISTERS and len(tokens) == 4:
+			return True
+		else:
+			return False
+	elif mnemonic in SUPPORTED_SINGLE_INSTRUCTIONS:
+		if operand1 in SUPPORTED_REGISTERS and len(tokens) == 2:
+			return True
+		else:
+			return False
 	else:
 		return False
 
@@ -223,16 +279,18 @@ def get_source_artifacts(cleaned_lines: [str]) -> [SourceArtifact]:
 			source_artifacts.append(tag)
 		else:
 			# instruction (make sure mnemonic is upper case)
-			tokens = line.split(' ')
+			tokens = line.replace(',', '').split(' ')
 			if is_valid_instruction(tokens):
-				mnemonic = tokens[0]
+				mnemonic = tokens[0].upper()
 				operand1 = tokens[1]
-				operand2 = tokens[2]
-				if len(tokens) == 4:
+				operand2 = None
+				tagname = None
+				if len(tokens) == 3:
+					operand2 = tokens[2]
+				elif len(tokens) == 4:
+					operand2 = tokens[2]
 					tagname = tokens[3]
-				else:
-					tagname = None
-				raw_instr = RawInstruction(mnemonic=mnemonic.upper(), operand1=operand1, operand2=operand2, tagname=tagname)
+				raw_instr = RawInstruction(mnemonic=mnemonic, operand1=operand1, operand2=operand2, tagname=tagname)
 				source_artifacts.append(raw_instr)
 			else:
 				raise Exception(f'Invalid instruction: {line}')
@@ -245,36 +303,364 @@ def get_intermediate_instructions(raw_instr: RawInstruction) -> [IntermediateIns
 	operand2 = raw_instr.operand2
 	tagname = raw_instr.tagname
 	if mnemonic in SUPPORTED_BRANCH_INSTRUCTIONS:
-		# raise exception if tagname is not in tag_map
-		if tagname not in tag_map:
-			raise Exception(f'Invalid tag: {tagname}')
 		branch_instr = BranchIntermediateInstruction(mnemonic=mnemonic, operand_reg1=operand1, operand_reg2=operand2, tagname=tagname)
 		intermediate_instructions.append(branch_instr)
 	elif mnemonic in SUPPORTED_MEMORY_INSTRUCTIONS:
-		imm = int(operand2[1:])
-		if mnemonic == 'LDR':
-			intermediate_instructions.append(MemoryIntermediateInstruction(mnemonic=mnemonic, is_load=True, dest_reg=operand1, addr=imm))
-		elif mnemonic == 'STR':
-			intermediate_instructions.append(MemoryIntermediateInstruction(mnemonic=mnemonic, is_load=False, dest_reg=operand1, addr=imm))
+		is_load = mnemonic == 'LDR'
+		addr = operand2[1:]
+		mem_instr = MemoryIntermediateInstruction(mnemonic=mnemonic, is_load=is_load, target_reg=operand1, addr=addr)
+		intermediate_instructions.append(mem_instr)
 	elif mnemonic in SUPPORTED_REGISTER_ONLY_INSTRUCTIONS:
 		intermediate_instructions.append(RegisterIntermediateInstruction(mnemonic=mnemonic, dest_reg=operand1, src_reg=operand2))
 	elif mnemonic in SUPPORTED_IMMEDIATE_ONLY_INSTRUCTIONS:
-		imm = int(operand2[1:])
+		imm = operand2[1:]
 		intermediate_instructions.append(ImmediateIntermediateInstruction(mnemonic=mnemonic, dest_reg=operand1, imm=imm))
 	elif mnemonic in SUPPORTED_MULTI_INSTRUCTIONS:
 		if operand2.startswith('#'):
-			imm = int(operand2[1:])
+			imm = operand2[1:]
 			intermediate_instructions.append(ImmediateIntermediateInstruction(mnemonic=mnemonic, dest_reg=operand1, imm=imm))
 		else:
 			intermediate_instructions.append(RegisterIntermediateInstruction(mnemonic=mnemonic, dest_reg=operand1, src_reg=operand2))
+	elif mnemonic in SUPPORTED_SINGLE_INSTRUCTIONS:
+		intermediate_instructions.append(RegisterIntermediateInstruction(mnemonic=mnemonic, dest_reg=operand1, src_reg=None))
 	else:
 		raise Exception(f'Invalid instruction: {raw_instr}')
+	return intermediate_instructions
 	
 def process_source_artifacts(source_artifacts: [SourceArtifact]) -> [IntermediateInstruction]:
-	machine_instructions = []
+	intermediate_instructions = []
 	for source_artifact in source_artifacts:
 		if isinstance(source_artifact, RawInstruction):
-			machine_instructions += get_intermediate_instructions(source_artifact)
+			intermediate_instructions += get_intermediate_instructions(source_artifact)
 		elif isinstance(source_artifact, Tag):
-			machine_instructions.append(TagIntermediateInstruction(tagname=source_artifact.name))
+			intermediate_instructions.append(TagIntermediateInstruction(mnemonic=None, tagname=source_artifact.name))
+	return intermediate_instructions
+
+def process_general_register_instruction(reg_instr: RegisterIntermediateInstruction) -> [MachineInstruction]:
+	return [RegMachineInstr(mnemonic=reg_instr.mnemonic, dest_reg=reg_instr.dest_reg, src_reg=reg_instr.src_reg)]
+
+def process_general_immediate_instruction(imm_instr: ImmediateIntermediateInstruction) -> [MachineInstruction]:
+	print(imm_instr.imm)
+	left_imm, right_imm = get_half_imms(imm_instr.imm)
+	first_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=left_imm)
+	second_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=right_imm)
+	reg_instr = RegMachineInstr(mnemonic=imm_instr.mnemonic, dest_reg=imm_instr.dest_reg, src_reg=RESERVED_REGISTER_NAME)
+	return [first_set_instr, second_set_instr, reg_instr]
+
+def process_add_instr(add_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(add_instr, RegisterIntermediateInstruction):
+		return process_general_register_instruction(add_instr)
+	elif isinstance(add_instr, ImmediateIntermediateInstruction):
+		return process_general_immediate_instruction(add_instr)
+	else:
+		raise Exception(f'Invalid ADD Instruction: {add_instr}')
+
+def process_sub_instr(sub_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(sub_instr, RegisterIntermediateInstruction):
+		raise Exception(f'SUB instruction does not support register operands')
+	elif isinstance(sub_instr, ImmediateIntermediateInstruction):
+		# convert sub into add and 2s complement the immediate value
+		sub_instr.mnemonic = 'ADD'
+		# 2s complement the immediate value
+		imm = get_twos_complement_negative(sub_instr.imm)
+		left_half_imm, right_half_imm = imm[:4], imm[4:]
+		first_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_imm)
+		second_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_imm)
+		reg_instr = RegMachineInstr(mnemonic='ADD', dest_reg=sub_instr.dest_reg, src_reg=RESERVED_REGISTER_NAME)
+		return [first_set_instr, second_set_instr, reg_instr]
+	else:
+		raise Exception(f'Invalid SUB Instruction: {sub_instr}')
+
+def process_and_instr(and_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(and_instr, RegisterIntermediateInstruction):
+		return process_general_register_instruction(and_instr)
+	elif isinstance(and_instr, ImmediateIntermediateInstruction):
+		return process_general_immediate_instruction(and_instr)
+	else:
+		raise Exception(f'Invalid AND Instruction: {and_instr}')
+
+def process_mem_instruction(mem_instr: MemoryIntermediateInstruction) -> [MachineInstruction]:
+	addr = int(mem_instr.addr)
+	left_half_addr, right_half_addr = get_half_imms(addr)
+	first_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_addr)
+	second_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_addr)
+	mem_instr = MemMachineInstr(mnemonic='MEM', is_load=mem_instr.is_load, target_reg=mem_instr.target_reg)
+	return [first_set_instr, second_set_instr, mem_instr]
+
+def process_xor_instr(xor_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(xor_instr, RegisterIntermediateInstruction):
+		return process_general_register_instruction(xor_instr)
+	elif isinstance(xor_instr, ImmediateIntermediateInstruction):
+		return process_general_immediate_instruction(xor_instr)
+	else:
+		raise Exception(f'Invalid XOR Instruction: {xor_instr}')
+
+def process_rol_instr(rol_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(rol_instr, RegisterIntermediateInstruction):
+		return process_general_register_instruction(rol_instr)
+	elif isinstance(rol_instr, ImmediateIntermediateInstruction):
+		return process_general_immediate_instruction(rol_instr)
+	else:
+		raise Exception(f'Invalid ROL Instruction: {rol_instr}')
+
+def process_ror_instr(ror_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(ror_instr, RegisterIntermediateInstruction):
+		raise Exception(f'ROR instruction does not support register operands')
+	elif isinstance(ror_instr, ImmediateIntermediateInstruction):
+		shamt = int(ror_instr.imm)
+		shamt = shamt % 8
+		shamt = 8 - shamt
+		ror_instr.imm = str(shamt)
+		ror_instr.mnemonic = 'ROL'
+		return process_general_immediate_instruction(ror_instr)
+	else:
+		raise Exception(f'Invalid ROR Instruction: {ror_instr}')
+
+def process_lsl_instr(lsl_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(lsl_instr, RegisterIntermediateInstruction):
+		raise Exception(f'LSL instruction does not support register operands')
+	elif isinstance(lsl_instr, ImmediateIntermediateInstruction):
+		shamt = int(lsl_instr.imm)
+		if shamt >= 8:
+			return [RegMachineInstr(mnemonic='XOR', dest_reg=lsl_instr.dest_reg, src_reg=lsl_instr.dest_reg)]
+		else:
+			shift_amt = int(lsl_instr.imm)
+			left_half_imm, right_half_imm = get_half_imms(shift_amt)
+			first_set_instr_rol = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_imm)
+			second_set_instr_rol = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_imm)
+			reg_instr = RegMachineInstr(mnemonic='ROL', dest_reg=lsl_instr.dest_reg, src_reg=RESERVED_REGISTER_NAME)
+			mask = get_mask_bits_rtl(shamt)
+			left_half_mask, right_half_mask = mask[:4], mask[4:]
+			first_set_instr_mask = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_mask)
+			second_set_instr_mask = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_mask)
+			mask_instr = RegMachineInstr(mnemonic='AND', dest_reg=lsl_instr.dest_reg, src_reg=RESERVED_REGISTER_NAME)
+			return [first_set_instr_rol, second_set_instr_rol, reg_instr, first_set_instr_mask, second_set_instr_mask, mask_instr]
+	else:
+		raise Exception(f'Invalid LSL Instruction: {lsl_instr}')
+
+def process_lsr_instr(lsr_instr: IntermediateInstruction) -> [MachineInstruction]:
+	# ROL is the only available rotate instruction
+	if isinstance(lsr_instr, RegisterIntermediateInstruction):
+		raise Exception(f'LSR instruction does not support register operands')
+	elif isinstance(lsr_instr, ImmediateIntermediateInstruction):
+		shamt = int(lsr_instr.imm)
+		if shamt >= 8:
+			return [RegMachineInstr(mnemonic='XOR', dest_reg=lsr_instr.dest_reg, src_reg=lsr_instr.dest_reg)]
+		else:
+			shift_amt = int(lsr_instr.imm)
+			shift_amt = 8 - shift_amt
+			left_half_imm, right_half_imm = get_half_imms(shift_amt)
+			first_set_instr_rol = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_imm)
+			second_set_instr_rol = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_imm)
+			reg_instr = RegMachineInstr(mnemonic='ROL', dest_reg=lsr_instr.dest_reg, src_reg=RESERVED_REGISTER_NAME)
+			mask = get_mask_bits_rtl(shamt)
+			mask = mask[::-1]
+			left_half_mask, right_half_mask = mask[:4], mask[4:]
+			first_set_instr_mask = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_mask)
+			second_set_instr_mask = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_mask)
+			mask_instr = RegMachineInstr(mnemonic='AND', dest_reg=lsr_instr.dest_reg, src_reg=RESERVED_REGISTER_NAME)
+			return [first_set_instr_rol, second_set_instr_rol, reg_instr, first_set_instr_mask, second_set_instr_mask, mask_instr]
+
+def process_zer_instr(zer_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(zer_instr, RegisterIntermediateInstruction):
+		return [RegMachineInstr(mnemonic='XOR', dest_reg=zer_instr.dest_reg, src_reg=zer_instr.dest_reg)]
+	else:
+		raise Exception(f'Invalid ZER Instruction: {zer_instr}')
+
+def process_beq_instr(beq_instr: BranchIntermediateInstruction) -> [MachineInstruction]:
+	if beq_instr.operand_reg2.startswith('#'):
+		raise Exception(f'BEQ instruction does not support immediate operands')
+	else:
+		return [SetMachineInstr(mnemonic='SET', flag=False, imm=None), SetMachineInstr(mnemonic='SET', flag=True, imm=None), BrnMachineInstr(mnemonic='BEQ', operand_reg1=beq_instr.operand_reg1, operand_reg2=beq_instr.operand_reg2, tagname=beq_instr.tagname)]
+
+def process_mov_instr(mov_instr: IntermediateInstruction) -> [MachineInstruction]:
+	if isinstance(mov_instr, RegisterIntermediateInstruction):
+		return process_general_register_instruction(mov_instr)
+	elif isinstance(mov_instr, ImmediateIntermediateInstruction):
+		return process_general_immediate_instruction(mov_instr)
+	else:
+		raise Exception(f'Invalid MOV Instruction: {mov_instr}')
+
+def process_tag_instr(tag_instr: TagIntermediateInstruction) -> [MachineInstruction]:
+	# remove the last character from the tag name
+	tagname = tag_instr.tagname.strip(':')
+	return [TagMachineInstruction(mnemonic=None, tagname=tagname)]
+
+def process_intermediate_instruction(intermediate_instr: IntermediateInstruction) -> [MachineInstruction]:
+	mnemonic = intermediate_instr.mnemonic
+	if isinstance(intermediate_instr, TagIntermediateInstruction):
+		return process_tag_instr(intermediate_instr)
+	if mnemonic == 'ADD':
+		return process_add_instr(intermediate_instr)
+	elif mnemonic == 'SUB':
+		return process_sub_instr(intermediate_instr)
+	elif mnemonic == 'AND':
+		return process_and_instr(intermediate_instr)
+	elif mnemonic == 'LDR' or mnemonic == 'STR':
+		return process_mem_instruction(intermediate_instr)
+	elif mnemonic == 'XOR':
+		return process_xor_instr(intermediate_instr)
+	elif mnemonic == 'ROL':
+		return process_rol_instr(intermediate_instr)
+	elif mnemonic == 'ROR':
+		return process_ror_instr(intermediate_instr)
+	elif mnemonic == 'LSL':
+		return process_lsl_instr(intermediate_instr)
+	elif mnemonic == 'LSR':
+		return process_lsr_instr(intermediate_instr)
+	elif mnemonic == 'BEQ':
+		return process_beq_instr(intermediate_instr)
+	elif mnemonic == 'MOV':
+		return process_mov_instr(intermediate_instr)
+	elif mnemonic == 'ZER':
+		return process_zer_instr(intermediate_instr)
+	else:
+		raise Exception(f'Invalid intermediate instruction: {intermediate_instr}')
+
+def process_intermediate_instructions(intermediate_instructions: [IntermediateInstruction]) -> [MachineInstruction]:
+	machine_instructions = []
+	for intermediate_instr in intermediate_instructions:
+		machine_instructions += process_intermediate_instruction(intermediate_instr)
 	return machine_instructions
+
+def get_register_bits(reg: str) -> str:
+	if reg == 'R0':
+		return '000'
+	elif reg == 'R1':
+		return '001'
+	elif reg == 'R2':
+		return '010'
+	elif reg == 'R3':
+		return '011'
+	elif reg == 'R4':
+		return '100'
+	elif reg == 'R5':
+		return '101'
+	elif reg == 'R6':
+		return '110'
+	elif reg == 'R7':
+		return '111'
+	else:
+		raise Exception(f'Invalid register: {reg}')
+	
+def get_opcode_bits(mnemonic: str) -> str:
+	if mnemonic == 'ADD':
+		return ADD_OPCODE
+	elif mnemonic == 'AND':
+		return AND_OPCODE
+	elif mnemonic == 'XOR':
+		return XOR_OPCODE
+	elif mnemonic == 'ROL':
+		return ROL_OPCODE
+	elif mnemonic == 'BEQ':
+		return BEQ_OPCODE
+	elif mnemonic == 'SET':
+		return SET_OPCODE
+	elif mnemonic == 'MEM':
+		return MEM_OPCODE
+	elif mnemonic == 'MOV':
+		return MOV_OPCODE
+	else:
+		raise Exception(f'Invalid mnemonic: {mnemonic}')
+
+'''
+Returns the tagless version of the machine instructions with all the tag information being extracted
+'''
+def extract_tag_information(machine_instructions: [MachineInstruction]) -> [MachineInstruction]:
+	ctr = 0
+	for machine_instr in machine_instructions:
+		if isinstance(machine_instr, TagMachineInstruction):
+			tag_map[machine_instr.tagname] = ctr
+			machine_instructions.remove(machine_instr)
+		else:
+			ctr += 1
+	return machine_instructions
+
+def tag_branch_instructions(machine_instructions: [MachineInstruction]) -> [MachineInstruction]:
+	# store the binary representation of the offset from the current instruction to the tag
+	for i, machine_instr in enumerate(machine_instructions):
+		if isinstance(machine_instr, BrnMachineInstr):
+			tagname = machine_instr.tagname
+			if tagname not in tag_map:
+				raise Exception(f'Invalid tag: {tagname}')
+			tag_offset = tag_map[tagname] - i
+			if tag_offset < -128 or tag_offset > 127:
+				raise Exception(f'Tag offset is too large: {tag_offset}')
+			if tag_offset < 0:
+				tag_offset = get_twos_complement_negative(abs(tag_offset))
+			else:
+				tag_offset = bin(tag_offset)[2:]
+			left_tag_offset, right_tag_offset = tag_offset[:4], tag_offset[4:]
+			first_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=left_tag_offset)
+			second_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=right_tag_offset)
+			machine_instr = BrnMachineInstr(mnemonic='BEQ', operand_reg1=machine_instr.operand_reg1, operand_reg2=machine_instr.operand_reg2, tagname=tagname)
+			machine_instructions[i-2] = first_set_instr
+			machine_instructions[i-1] = second_set_instr
+			machine_instructions[i] = machine_instr
+	return machine_instructions
+
+def encode_register_instruction(machine_instr: RegMachineInstr) -> str:
+	valid_instructions = ['ADD', 'AND', 'XOR', 'ROL', 'MOV']
+	if machine_instr.mnemonic not in valid_instructions:
+		raise Exception(f'Invalid register instruction: {machine_instr}')
+	opcode = get_opcode_bits(machine_instr.mnemonic)
+	dest_reg = get_register_bits(machine_instr.dest_reg)
+	src_reg = get_register_bits(machine_instr.src_reg)
+	return opcode + dest_reg + src_reg
+
+def encode_set_instruction(machine_instr: SetMachineInstr) -> str:
+	if machine_instr.mnemonic != 'SET':
+		raise Exception(f'Invalid SET instruction: {machine_instr}')
+	opcode = get_opcode_bits(machine_instr.mnemonic)
+	flag = '0' if machine_instr.flag == False else '1'
+	imm = machine_instr.imm
+	return opcode + '0' + flag + imm
+
+def encode_mem_instruction(machine_instr: MemMachineInstr) -> str:
+	if machine_instr.mnemonic != 'MEM':
+		raise Exception(f'Invalid MEM instruction: {machine_instr}')
+	opcode = get_opcode_bits(machine_instr.mnemonic)
+	is_load = '0' if machine_instr.is_load == True else '1'
+	target_reg = get_register_bits(machine_instr.target_reg)
+	return opcode + target_reg + is_load + '00'
+
+def encode_brn_instruction(machine_instr: BrnMachineInstr) -> str:
+	if machine_instr.mnemonic != 'BEQ':
+		raise Exception(f'Invalid BEQ instruction: {machine_instr}')
+	opcode = get_opcode_bits(machine_instr.mnemonic)
+	operand_reg1 = get_register_bits(machine_instr.operand_reg1)
+	operand_reg2 = get_register_bits(machine_instr.operand_reg2)
+	return opcode + operand_reg1 + operand_reg2
+
+def encode_machine_instruction(machine_instr: MachineInstruction) -> str:
+	if isinstance(machine_instr, RegMachineInstr):
+		return encode_register_instruction(machine_instr)
+	elif isinstance(machine_instr, SetMachineInstr):
+		return encode_set_instruction(machine_instr)
+	elif isinstance(machine_instr, MemMachineInstr):
+		return encode_mem_instruction(machine_instr)
+	elif isinstance(machine_instr, BrnMachineInstr):
+		return encode_brn_instruction(machine_instr)
+	else:
+		raise Exception(f'Invalid machine instruction: {machine_instr}')
+
+def encode_machine_instructions(machine_instructions: [MachineInstruction]) -> [str]:
+	encoded_machine_instructions = []
+	for machine_instr in machine_instructions:
+		encoded_machine_instructions.append(encode_machine_instruction(machine_instr))
+	return encoded_machine_instructions
+
+def main():
+	SOURCE_FILE = 'input.txt'
+	cleaned_lines = get_cleaned_lines(SOURCE_FILE)
+	source_artifacts = get_source_artifacts(cleaned_lines)
+	intermediate_instructions = process_source_artifacts(source_artifacts)
+	machine_instructions = process_intermediate_instructions(intermediate_instructions)
+	machine_instructions = extract_tag_information(machine_instructions)
+	machine_instructions = tag_branch_instructions(machine_instructions)
+	encoded_machine_instructions = encode_machine_instructions(machine_instructions)
+	for (machine_instruction, encoded_machine_instruction) in zip(machine_instructions, encoded_machine_instructions):
+		print(f'{encoded_machine_instruction} <- {machine_instruction}')
+
+if __name__ == '__main__':
+	main()
