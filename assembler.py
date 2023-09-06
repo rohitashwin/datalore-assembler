@@ -180,6 +180,7 @@ class ImmediateIntermediateInstruction(IntermediateInstruction):
 class MemoryIntermediateInstruction(IntermediateInstruction):
 	is_load: bool
 	target_reg: str
+	source_reg: str
 	addr: str
 
 @dataclass
@@ -251,7 +252,9 @@ def is_valid_instruction(tokens: [str]) -> bool:
 		else:
 			return False
 	elif mnemonic in SUPPORTED_MEMORY_INSTRUCTIONS:
-		if operand1 in SUPPORTED_REGISTERS and operand2.startswith('#') and operand2[1:].isnumeric():
+		if operand1 in SUPPORTED_REGISTERS and operand2 in SUPPORTED_REGISTERS:
+			return True
+		elif operand1 in SUPPORTED_REGISTERS and operand2.startswith('#') and operand2[1:].isnumeric():
 			return True
 		else:
 			return False
@@ -306,8 +309,10 @@ def get_intermediate_instructions(raw_instr: RawInstruction) -> [IntermediateIns
 		intermediate_instructions.append(branch_instr)
 	elif mnemonic in SUPPORTED_MEMORY_INSTRUCTIONS:
 		is_load = mnemonic == 'LDR'
-		addr = operand2[1:]
-		mem_instr = MemoryIntermediateInstruction(mnemonic=mnemonic, is_load=is_load, target_reg=operand1, addr=addr)
+		if operand2.startswith('#'):
+			mem_instr = MemoryIntermediateInstruction(mnemonic=mnemonic, is_load=is_load, target_reg=operand1, source_reg=None, addr=operand2[1:])
+		else:
+			mem_instr = MemoryIntermediateInstruction(mnemonic=mnemonic, is_load=is_load, target_reg=operand1, source_reg=operand2, addr=None)
 		intermediate_instructions.append(mem_instr)
 	elif mnemonic in SUPPORTED_REGISTER_ONLY_INSTRUCTIONS:
 		intermediate_instructions.append(RegisterIntermediateInstruction(mnemonic=mnemonic, dest_reg=operand1, src_reg=operand2))
@@ -379,12 +384,19 @@ def process_and_instr(and_instr: IntermediateInstruction) -> [MachineInstruction
 		raise Exception(f'Invalid AND Instruction: {and_instr}')
 
 def process_mem_instruction(mem_instr: MemoryIntermediateInstruction) -> [MachineInstruction]:
-	addr = int(mem_instr.addr)
-	left_half_addr, right_half_addr = get_half_imms(addr)
-	first_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_addr)
-	second_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_addr)
-	mem_instr = MemMachineInstr(mnemonic='MEM', is_load=mem_instr.is_load, target_reg=mem_instr.target_reg)
-	return [first_set_instr, second_set_instr, mem_instr]
+	if mem_instr.source_reg is None and mem_instr.addr is not None:
+		addr = int(mem_instr.addr)
+		left_half_addr, right_half_addr = get_half_imms(addr)
+		first_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_addr)
+		second_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_addr)
+		mem_instr = MemMachineInstr(mnemonic='MEM', is_load=mem_instr.is_load, target_reg=mem_instr.target_reg)
+		return [first_set_instr, second_set_instr, mem_instr]
+	elif mem_instr.source_reg is not None and mem_instr.addr is None:
+		mov_instr = RegMachineInstr(mnemonic='MOV', dest_reg=RESERVED_REGISTER_NAME, src_reg=mem_instr.source_reg)
+		mem_instr = MemMachineInstr(mnemonic='MEM', is_load=mem_instr.is_load, target_reg=mem_instr.target_reg)
+		return [mov_instr, mem_instr]
+	else:
+		raise Exception(f'Invalid State detected in Mem instruction: {mem_instr}')
 
 def process_xor_instr(xor_instr: IntermediateInstruction) -> [MachineInstruction]:
 	if isinstance(xor_instr, RegisterIntermediateInstruction):
