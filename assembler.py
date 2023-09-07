@@ -46,24 +46,22 @@ XOR
 	XOR R1, R2				// R1 = R1 ^ R2
     XOR R1, #37				// R1 = R1 ^ 37
 LDR
+	LDR R1, R2
 	LDR R1, #37				// R1 = MEM[37]
 STR
+	STR R1, R2
 	STR R1, #37				// MEM[37] = R1
 ROL
 	ROL R1, R2				// R1 = R1 rot<< R2
     ROL R1, #37				// R1 = R1 rot<< 37
 ROR
-	ROR R1, R2				// R1 = R1 rot>> R2
     ROR R1, #37				// R1 = R1 rot>> 37
 LSL
-	LSL R1, R2				// R1 = R1 << R2
     LSL R1, #37				// R1 = R1 << 37
 LSR
-	LSR R1, R2				// R1 = R1 >> R2
     LSR R1, #37				// R1 = R1 >> 37
 BEQ
 	BEQ R1, R2, <tag>		// if (R1 == R2) PC = R7
-	BEQ R1, #37, <tag>		// if (R1 == 37) PC = R7
 MOV
 	MOV R1, R2				// R1 = R2
     MOV R1, #37				// R1 = 37
@@ -104,7 +102,7 @@ MEM
 	000 OPCODE
 	RRR TARGET REGISTER
 	F 	FLAG (0 for load, 1 for store)
-	XX	UNUSED
+	XX	UNUSED	
 
 ADD
 	001 OPCODE
@@ -212,6 +210,7 @@ class SetMachineInstr(MachineInstruction):
 class MemMachineInstr(MachineInstruction):
 	is_load: bool
 	target_reg: str
+	target_location: str
 
 @dataclass
 class BrnMachineInstr(MachineInstruction):
@@ -389,11 +388,11 @@ def process_mem_instruction(mem_instr: MemoryIntermediateInstruction) -> [Machin
 		left_half_addr, right_half_addr = get_half_imms(addr)
 		first_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=left_half_addr)
 		second_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=right_half_addr)
-		mem_instr = MemMachineInstr(mnemonic='MEM', is_load=mem_instr.is_load, target_reg=mem_instr.target_reg)
+		mem_instr = MemMachineInstr(mnemonic='MEM', is_load=mem_instr.is_load, target_reg=mem_instr.target_reg, target_location=RESERVED_REGISTER_NAME)
 		return [first_set_instr, second_set_instr, mem_instr]
 	elif mem_instr.source_reg is not None and mem_instr.addr is None:
 		mov_instr = RegMachineInstr(mnemonic='MOV', dest_reg=RESERVED_REGISTER_NAME, src_reg=mem_instr.source_reg)
-		mem_instr = MemMachineInstr(mnemonic='MEM', is_load=mem_instr.is_load, target_reg=mem_instr.target_reg)
+		mem_instr = MemMachineInstr(mnemonic='MEM', is_load=mem_instr.is_load, target_reg=mem_instr.target_reg, target_location=RESERVED_REGISTER_NAME)
 		return [mov_instr, mem_instr]
 	else:
 		raise Exception(f'Invalid State detected in Mem instruction: {mem_instr}')
@@ -482,7 +481,22 @@ def process_beq_instr(beq_instr: BranchIntermediateInstruction) -> [MachineInstr
 	if beq_instr.operand_reg2.startswith('#'):
 		raise Exception(f'BEQ instruction does not support immediate operands')
 	else:
-		return [SetMachineInstr(mnemonic='SET', flag=False, imm=None), SetMachineInstr(mnemonic='SET', flag=True, imm=None), BrnMachineInstr(mnemonic='BEQ', operand_reg1=beq_instr.operand_reg1, operand_reg2=beq_instr.operand_reg2, tagname=beq_instr.tagname)]
+		# Store instruction
+		# data_mem[200]: XXXX 1234 
+		# data_mem[201]: 5678 9ABC
+		# First Set: 	1234
+		# Second Set: 	5678
+		# Third Set: 	9ABC
+
+		instruction_group = [
+			SetMachineInstr(mnemonic='SET', flag=True, imm=None),														# First Set for Right Half data_mem[200]
+			MemMachineInstr(mnemonic='MEM', is_load=False, target_reg=RESERVED_REGISTER_NAME, target_location='200'),	# Set the memory instruction
+			SetMachineInstr(mnemonic='SET', flag=False, imm=None),														# Second Set for Left Half data_mem[201]
+			SetMachineInstr(mnemonic='SET', flag=True, imm=None),														# Third Set for Right Hald data_mem[201]
+			MemMachineInstr(mnemonic='MEM', is_load=False, target_reg=RESERVED_REGISTER_NAME, target_location='201'),	# Set the memory instruction
+			BrnMachineInstr(mnemonic='BEQ', operand_reg1=beq_instr.operand_reg1, operand_reg2=beq_instr.operand_reg2, tagname=beq_instr.tagname)
+		]
+		return instruction_group
 
 def process_mov_instr(mov_instr: IntermediateInstruction) -> [MachineInstruction]:
 	if isinstance(mov_instr, RegisterIntermediateInstruction):
@@ -595,19 +609,34 @@ def tag_branch_instructions(machine_instructions: [MachineInstruction]) -> [Mach
 			if tagname not in tag_map:
 				raise Exception(f'Invalid tag: {tagname}')
 			tag_offset = tag_map[tagname] - i
-			if tag_offset < -128 or tag_offset > 127:
+			if tag_offset < -2048 or tag_offset > 2047:
 				raise Exception(f'Tag offset is too large: {tag_offset}')
 			if tag_offset < 0:
-				tag_offset = get_twos_complement_negative(abs(tag_offset))
+				tag_offset = get_12_bit_twos_comp_negative(str(abs(tag_offset)))
 			else:
-				tag_offset = bin(tag_offset)[2:]
-			left_tag_offset, right_tag_offset = tag_offset[:4], tag_offset[4:]
-			first_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=left_tag_offset)
-			second_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=right_tag_offset)
-			machine_instr = BrnMachineInstr(mnemonic='BEQ', operand_reg1=machine_instr.operand_reg1, operand_reg2=machine_instr.operand_reg2, tagname=tagname)
-			machine_instructions[i-2] = first_set_instr
-			machine_instructions[i-1] = second_set_instr
-			machine_instructions[i] = machine_instr
+				tag_offset = get_12_bit_memory_address(tag_offset)
+			lower_right_imm, upper_left_imm, upper_right_imm = tag_offset[0:4], tag_offset[4:8], tag_offset[8:12]
+			# verifying instructions
+			if not isinstance(machine_instructions[i-5], SetMachineInstr) or machine_instructions[i-5].imm is not None:
+				raise Exception(f'Invalid Branch Instruction State Detected, Expected Empty Set Instruction 5 indices earlier')
+			if not isinstance(machine_instructions[i-4], MemMachineInstr) or machine_instructions[i-4].target_location != '200':
+				raise Exception(f'Invalid Branch Instruction State Detected, Expected STR R7, 200 4 indices earlier')	
+			if not isinstance(machine_instructions[i-3], SetMachineInstr) or machine_instructions[i-3].imm is not None:
+				raise Exception(f'Invalid Branch Instruction State Detected, Expected Empty Set Instruction 3 indices earlier')
+			if not isinstance(machine_instructions[i-2], SetMachineInstr) or machine_instructions[i-2].imm is not None:
+				raise Exception(f'Invalid Branch Instruction State Detected, Expected Empty Set Instruction 2 indices earlier')
+			if not isinstance(machine_instructions[i-1], MemMachineInstr) or machine_instructions[i-1].target_location != '201':
+				raise Exception(f'Invalid Branch Instruction State Detected, Expected STR R7, 201 1 index before')
+			first_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=lower_right_imm)
+			first_mem_instr = MemMachineInstr(mnemonic='MEM', is_load=False, target_reg=RESERVED_REGISTER_NAME, target_location='200')
+			second_set_instr = SetMachineInstr(mnemonic='SET', flag=False, imm=upper_left_imm)
+			third_set_instr = SetMachineInstr(mnemonic='SET', flag=True, imm=upper_right_imm)
+			second_mem_instr = MemMachineInstr(mnemonic='MEM', is_load=False, target_reg=RESERVED_REGISTER_NAME, target_location='201')
+			machine_instructions[i-5] = first_set_instr
+			machine_instructions[i-4] = first_mem_instr
+			machine_instructions[i-3] = second_set_instr
+			machine_instructions[i-2] = third_set_instr
+			machine_instructions[i-1] = second_mem_instr
 	return machine_instructions
 
 def encode_register_instruction(machine_instr: RegMachineInstr) -> str:
@@ -625,6 +654,8 @@ def encode_set_instruction(machine_instr: SetMachineInstr) -> str:
 	opcode = get_opcode_bits(machine_instr.mnemonic)
 	flag = '0' if machine_instr.flag == False else '1'
 	imm = machine_instr.imm
+	if len(imm) != 4:
+		raise Exception(f'Invalid SET half immediate {imm} detected. Did you mean to zerofill the half immediate?')
 	return opcode + '0' + flag + imm
 
 def encode_mem_instruction(machine_instr: MemMachineInstr) -> str:
@@ -633,7 +664,14 @@ def encode_mem_instruction(machine_instr: MemMachineInstr) -> str:
 	opcode = get_opcode_bits(machine_instr.mnemonic)
 	is_load = '0' if machine_instr.is_load == True else '1'
 	target_reg = get_register_bits(machine_instr.target_reg)
-	return opcode + target_reg + is_load + '00'
+	if machine_instr.target_location == RESERVED_REGISTER_NAME:
+		return opcode + target_reg + is_load + '00'
+	elif machine_instr.target_location == '200':
+		return opcode + target_reg + is_load + '01'
+	elif machine_instr.target_location == '201':
+		return opcode + target_reg + is_load + '10'	
+	else:
+		raise Exception(f'Invalid branch target location detected: {machine_instr.target_location}')
 
 def encode_brn_instruction(machine_instr: BrnMachineInstr) -> str:
 	if machine_instr.mnemonic != 'BEQ':

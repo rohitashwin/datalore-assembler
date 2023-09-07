@@ -27,6 +27,26 @@ def get_half_imms(imm: str) -> (str, str):
 		raise Exception(f'Immediate value {imm} is too large')
 	return imm[:4], imm[4:]
 
+def get_12_bit_memory_address(num: str) -> str:
+	num = int(num)
+	if num < 0:
+		raise Exception('Only positive numbers can be converted to 12 bit representations. Did you mean you apply abs()?')
+	num = bin(num)[2:]
+	num = num.zfill(12)
+	if len(num) > 12:
+		raise Exception(f'Address offset value {num} is too large')
+	return num
+
+def get_12_bit_twos_comp_negative(num: str) -> str:
+	num = get_12_bit_memory_address(num)
+	num = num.replace('0', 'x')
+	num = num.replace('1', '0')
+	num = num.replace('x', '1')
+	num = bin(int(num, 2) + 1)[2:]
+	if len(num) > 12:
+		raise Exception(f'Address offset value {num} is too small')
+	return num
+
 def get_twos_complement_negative(num: str) -> str:
 	num = int(num)
 	num = bin(num)[2:]
